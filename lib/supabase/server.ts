@@ -103,8 +103,8 @@ export function createSupabaseAdminClient() {
 export function getSiteUrl() {
   const origin = headers().get("origin");
   return (
-    origin ||
     process.env.NEXT_PUBLIC_SITE_URL ||
+    origin ||
     "http://localhost:3000"
   ).replace(/\/$/, "");
 }

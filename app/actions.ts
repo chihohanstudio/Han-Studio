@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import {
   isStudentEmail,
   normalizeEmail,
+  ensureProfileForAuthenticatedUser,
   requireAdmin,
   requireProfile,
   requireStudent
@@ -83,11 +84,16 @@ export async function startFrontendPreview(formData: FormData) {
   withMessage(previewHomeForRole(role), "success", `${role === "admin" ? "Admin" : "Student"} preview started.`);
 }
 
-export async function requestMagicLink(formData: FormData) {
+export async function signInWithPassword(formData: FormData) {
   const email = normalizeEmail(text(formData, "email"));
+  const password = String(formData.get("password") ?? "");
 
   if (!email) {
     withMessage("/login", "error", "Enter your IU email address.");
+  }
+
+  if (!password) {
+    withMessage("/login", "error", "Enter your password.");
   }
 
   if (!isStudentEmail(email)) {
@@ -98,57 +104,109 @@ export async function requestMagicLink(formData: FormData) {
     withMessage("/login", "error", "Supabase is not connected yet. Use preview access for frontend work.");
   }
 
-  const admin = createSupabaseAdminClient();
+  const supabase = createSupabaseServerClient();
+  const {
+    data: { user },
+    error
+  } = await supabase.auth.signInWithPassword({
+    email,
+    password
+  });
 
-  const [{ data: profile, error: profileError }, { data: invitation, error: invitationError }] =
-    await Promise.all([
-      admin.from("profiles").select("id,email,status").eq("email", email).maybeSingle(),
-      admin.from("invitations").select("id,email,status,expires_at").eq("email", email).maybeSingle()
-    ]).catch((error) => {
-      console.error("Supabase invitation check failed", error);
-      withMessage("/login", "error", "Could not connect to Supabase. Check the project URL, keys, and network.");
-    });
+  if (error) {
+    console.error("Supabase password sign-in failed", error);
+    const message = /email not confirmed/i.test(error.message)
+      ? "Complete the invitation email and set a password before signing in."
+      : "Email or password is incorrect.";
+    withMessage("/login", "error", message);
+  }
+
+  if (!user?.email) {
+    withMessage("/login", "error", "Could not complete sign in. Try again.");
+  }
+
+  let profile;
+  try {
+    profile = await ensureProfileForAuthenticatedUser(user.id, user.email);
+  } catch (profileError) {
+    await supabase.auth.signOut();
+    console.error("Studio profile check failed after password sign-in", profileError);
+    const message = profileError instanceof Error ? profileError.message : "This account cannot access the studio site.";
+    withMessage("/login", "error", message);
+  }
+
+  if (profile.status !== "active") {
+    await supabase.auth.signOut();
+    withMessage("/login", "error", "This account has been archived.");
+  }
+
+  const destination = profile.role === "admin" ? "/admin/dashboard" : "/student/dashboard";
+  withMessage(destination, "success", "Signed in.");
+}
+
+export async function sendPasswordResetEmail(formData: FormData) {
+  const email = normalizeEmail(text(formData, "email"));
+
+  if (!email || !isStudentEmail(email)) {
+    withMessage("/forgot-password", "error", "Enter your invited IU email address.");
+  }
+
+  if (!hasRealSupabaseConfig()) {
+    withMessage("/forgot-password", "error", "Supabase is not connected yet.");
+  }
+
+  const admin = createSupabaseAdminClient();
+  const { data: profile, error: profileError } = await admin
+    .from("profiles")
+    .select("status")
+    .eq("email", email)
+    .maybeSingle();
 
   if (profileError) {
     throw profileError;
   }
 
-  if (invitationError) {
-    throw invitationError;
-  }
-
-  if (profile?.status === "archived") {
-    withMessage("/login", "error", "This account has been archived.");
-  }
-
-  if (!profile && !invitation) {
-    withMessage("/login", "error", "This IU email is not on the studio invitation list.");
-  }
-
-  if (invitation?.status === "expired") {
-    withMessage("/login", "error", "This invitation has expired.");
-  }
-
-  if (invitation?.expires_at && new Date(invitation.expires_at) <= new Date()) {
-    await admin.from("invitations").update({ status: "expired" }).eq("id", invitation.id);
-    withMessage("/login", "error", "This invitation has expired.");
+  // Do not reveal whether an address has an account. Archived accounts cannot reset access.
+  if (!profile || profile.status !== "active") {
+    withMessage("/login", "success", "If this account is active, a password reset email has been sent.");
   }
 
   const supabase = createSupabaseServerClient();
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: {
-      emailRedirectTo: `${getSiteUrl()}/auth/callback`,
-      shouldCreateUser: true
-    }
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: getSiteUrl()
   });
 
   if (error) {
-    console.error("Supabase magic link failed", error);
-    withMessage("/login", "error", error.message);
+    console.error("Supabase password reset email failed", error);
+    withMessage("/forgot-password", "error", error.message);
   }
 
-  withMessage("/login", "success", "Check your IU email for the login link.");
+  withMessage("/login", "success", "Check your IU email for the password reset link.");
+}
+
+export async function setPassword(formData: FormData) {
+  const { profile } = await requireProfile();
+  const password = String(formData.get("password") ?? "");
+  const confirmation = String(formData.get("password_confirmation") ?? "");
+
+  if (password.length < 10) {
+    withMessage("/auth/set-password", "error", "Use at least 10 characters for your password.");
+  }
+
+  if (password !== confirmation) {
+    withMessage("/auth/set-password", "error", "The passwords do not match.");
+  }
+
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.auth.updateUser({ password });
+
+  if (error) {
+    console.error("Supabase password update failed", error);
+    withMessage("/auth/set-password", "error", error.message);
+  }
+
+  const destination = profile.role === "admin" ? "/admin/dashboard" : "/student/dashboard";
+  withMessage(destination, "success", "Password saved.");
 }
 
 export async function signOut() {
@@ -253,13 +311,31 @@ export async function inviteStudents(formData: FormData) {
   completePreviewAction(next, `${parsed.length} invitation${parsed.length === 1 ? "" : "s"} saved.`);
 
   const admin = createSupabaseAdminClient();
+  let sent = 0;
+  let alreadyActive = 0;
+  const failed: string[] = [];
 
   for (const entry of parsed) {
     if (!isStudentEmail(entry.email)) {
       withMessage(next, "error", `${entry.email} is not an @iu.edu email address.`);
     }
 
-    const { error } = await admin.from("invitations").upsert(
+    const { data: existingProfile, error: existingProfileError } = await admin
+      .from("profiles")
+      .select("id")
+      .eq("email", entry.email)
+      .maybeSingle();
+
+    if (existingProfileError) {
+      throw existingProfileError;
+    }
+
+    if (existingProfile) {
+      alreadyActive += 1;
+      continue;
+    }
+
+    const { error: invitationError } = await admin.from("invitations").upsert(
       {
         email: entry.email,
         full_name: entry.fullName,
@@ -271,13 +347,50 @@ export async function inviteStudents(formData: FormData) {
       { onConflict: "email" }
     );
 
-    if (error) {
-      throw error;
+    if (invitationError) {
+      throw invitationError;
     }
+
+    const { error: authInvitationError } = await admin.auth.admin.inviteUserByEmail(entry.email, {
+      redirectTo: getSiteUrl(),
+      data: {
+        full_name: entry.fullName,
+        role: "student"
+      }
+    });
+
+    if (authInvitationError) {
+      // A pending invitation may already have created an Auth user. Keep its database invitation
+      // intact and avoid treating a repeat submission as a failed roster update.
+      if (/already (?:been )?registered|already exists/i.test(authInvitationError.message)) {
+        continue;
+      }
+
+      console.error("Supabase student invitation email failed", authInvitationError);
+      failed.push(entry.email);
+      continue;
+    }
+
+    sent += 1;
   }
 
   revalidatePath("/admin/students");
-  withMessage(next, "success", `${parsed.length} invitation${parsed.length === 1 ? "" : "s"} saved.`);
+
+  if (failed.length) {
+    withMessage(
+      next,
+      "error",
+      `Invitations were saved, but email could not be sent to ${failed.join(", ")}. Check Supabase SMTP and try again.`
+    );
+  }
+
+  const details = [
+    sent ? `${sent} email${sent === 1 ? "" : "s"} sent` : null,
+    alreadyActive ? `${alreadyActive} already active` : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  withMessage(next, "success", details || "Invitations are already awaiting activation.");
 }
 
 function parseRosterLine(line: string) {

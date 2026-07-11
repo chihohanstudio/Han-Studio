@@ -146,7 +146,7 @@ export default async function AdminStudentsPage({
       {searchParams?.modal === "invite" ? (
         <Modal
           title="Invite students"
-          description="One student per line — name and IU email."
+          description="One student per line — name and IU email. Each new student receives a password-setup email."
           closeHref={basePath}
         >
           <form action={inviteStudents} className="flex flex-col gap-4">
@@ -168,7 +168,7 @@ export default async function AdminStudentsPage({
               <ButtonLink href={basePath} variant="secondary">
                 Cancel
               </ButtonLink>
-              <Button type="submit">Save invitations</Button>
+              <Button type="submit">Send invitations</Button>
             </div>
           </form>
         </Modal>

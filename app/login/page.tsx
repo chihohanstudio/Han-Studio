@@ -1,5 +1,5 @@
 import { ArrowRight } from "lucide-react";
-import { requestMagicLink, startFrontendPreview } from "@/app/actions";
+import { signInWithPassword, startFrontendPreview } from "@/app/actions";
 import { LogoMark } from "@/components/logo";
 import { SetupNotice } from "@/components/setup-notice";
 import { Button } from "@/components/ui/button";
@@ -63,7 +63,7 @@ export default function LoginPage({
             <PageMessage searchParams={searchParams} />
           </div>
 
-          <form action={requestMagicLink} className="flex flex-col gap-4">
+          <form action={signInWithPassword} className="flex flex-col gap-4">
             <Field label="Email" htmlFor="login-email" helper="Use your IU email address">
               <Input
                 id="login-email"
@@ -74,16 +74,27 @@ export default function LoginPage({
                 required
               />
             </Field>
+            <Field label="Password" htmlFor="login-password">
+              <Input
+                id="login-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                required
+              />
+            </Field>
             <Button type="submit">
-              Send login link
+              Sign in
               <ArrowRight size={15} aria-hidden="true" />
             </Button>
           </form>
 
-          <p className="mt-4 text-2xs leading-relaxed text-neutral-500">
-            Every account must be invited before logging in. You will receive a magic link at your
-            IU email — no password needed.
-          </p>
+          <div className="mt-4 flex items-center justify-between gap-3 text-2xs">
+            <p className="leading-relaxed text-neutral-500">Invitation only. Set a password from your invite email.</p>
+            <a href="/forgot-password" className="shrink-0 font-medium text-neutral-700 underline underline-offset-2 hover:text-neutral-900">
+              Forgot password?
+            </a>
+          </div>
 
           {previewEnabled ? (
             <div className="mt-10 rounded-card border border-line bg-subtle/60 p-4">
