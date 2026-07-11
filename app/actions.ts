@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import type { EmailOtpType } from "@supabase/supabase-js";
 import {
   isStudentEmail,
   normalizeEmail,
@@ -49,6 +50,12 @@ function optionalInt(formData: FormData, key: string) {
 function redirectPath(formData: FormData, fallback: string) {
   const next = text(formData, "next");
   return next.startsWith("/") ? next : fallback;
+}
+
+const emailLinkTypes: readonly EmailOtpType[] = ["email", "invite", "recovery", "signup"];
+
+function isEmailLinkType(value: string): value is EmailOtpType {
+  return emailLinkTypes.includes(value as EmailOtpType);
 }
 
 function withMessage(path: string, type: "success" | "error", message: string): never {
@@ -207,6 +214,60 @@ export async function setPassword(formData: FormData) {
 
   const destination = profile.role === "admin" ? "/admin/dashboard" : "/student/dashboard";
   withMessage(destination, "success", "Password saved.");
+}
+
+export async function verifyEmailLink(formData: FormData) {
+  const tokenHash = text(formData, "token_hash");
+  const type = text(formData, "type");
+
+  if (!tokenHash || !isEmailLinkType(type)) {
+    withMessage("/login", "error", "This email link is incomplete. Request a new one.");
+  }
+
+  if (!hasRealSupabaseConfig()) {
+    withMessage("/login", "error", "Supabase is not connected yet.");
+  }
+
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.auth.verifyOtp({
+    token_hash: tokenHash,
+    type
+  });
+
+  if (error) {
+    console.error("Supabase email link verification failed", error);
+    withMessage("/login", "error", "Email link is invalid or has expired. Request a new one.");
+  }
+
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user?.email) {
+    withMessage("/login", "error", "Could not resolve the account from this email link.");
+  }
+
+  let profile;
+  try {
+    profile = await ensureProfileForAuthenticatedUser(user.id, user.email);
+  } catch (profileError) {
+    await supabase.auth.signOut();
+    console.error("Studio profile check failed after email verification", profileError);
+    const message = profileError instanceof Error ? profileError.message : "This account cannot access the studio site.";
+    withMessage("/login", "error", message);
+  }
+
+  if (profile.status !== "active") {
+    await supabase.auth.signOut();
+    withMessage("/login", "error", "This account has been archived.");
+  }
+
+  const destination = type === "invite" || type === "recovery"
+    ? "/auth/set-password"
+    : profile.role === "admin"
+      ? "/admin/dashboard"
+      : "/student/dashboard";
+  withMessage(destination, "success", type === "invite" ? "Email verified. Set your password." : "Email verified.");
 }
 
 export async function signOut() {
